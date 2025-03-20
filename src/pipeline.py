@@ -69,7 +69,7 @@ else:
     API_KEYS_SECRET = modal.Secret.from_dict({})
 
 # Image selection
-GPU_CHOICE = "H100:8"  # set to L40S usually
+GPU_CHOICE = "L40S:2"  # set to L40S usually
 CUDA_VERSION = "12.8.1"
 PYTHON_VERSION = "3.10"
 FLAVOR = "devel"  # includes full CUDA toolkit
@@ -168,7 +168,7 @@ GPU_BASE_IMAGE = (
 )
 
 GPU_IMAGE = (
-    TORCH_FLASH_ATTN_BASE_IMAGE
+    GPU_BASE_IMAGE
     .env(SHARED_ENV_VARS)
     .pip_install(*SHARED_PIP_PKGS, *SHARED_GPU_PIP_PKGS, extra_options="-q")
     .run_commands(*SHARED_CMDS)
