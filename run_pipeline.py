@@ -7,7 +7,7 @@ import argparse
 
 def main():
     # Default pipeline path values
-    PIPELINE_DIR = "embedding-based"
+    PIPELINE_DIR = "src"
     PIPELINE_FILE = "pipeline.py"
 
     # Set up argument parser

@@ -4,7 +4,7 @@
 #  - installs Python 3.10 locally
 #  - creates and activates the virtual environment
 #  - installs the dependencies for the app from requirements.txt in the virtual environment
-VENV_DIR=".venv"
+VENV_DIR=".pipeline-venv"
 # Set PYTHON_VERSION to first argument if provided, otherwise default to 3.10
 PYTHON_VERSION="3.10"
 
