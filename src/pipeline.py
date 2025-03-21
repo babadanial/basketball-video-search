@@ -36,12 +36,12 @@ import os
 app = modal.App("basketball-video-search")
 
 # Modal volume & GPU selection
-MODAL_VOLUME_NAME = "basketball-analysis"
+MODAL_VOLUME_NAME = "basketball-video-search"  # previously "basketball-analysis"
 MODAL_VOLUME_PATH = "/vol"
 VOL = modal.Volume.from_name(MODAL_VOLUME_NAME, create_if_missing=True)
-FRAME_DIR = MODAL_VOLUME_PATH + "/frames"
-EMBEDDINGS_DIR = MODAL_VOLUME_PATH + "/embeddings"
-RESULTS_DIR = MODAL_VOLUME_PATH + "/results"
+VOLUME_FRAME_DIR = MODAL_VOLUME_PATH + "/frames"
+VOLUME_EMBEDDINGS_DIR = MODAL_VOLUME_PATH + "/embeddings"
+VOLUME_RESULTS_DIR = MODAL_VOLUME_PATH + "/results"
 
 DEFAULT_QUERIES = [
     "slam dunk at the rim",
@@ -449,7 +449,7 @@ def extract_frames(video_path: str, video_metadata: dict, frame_interval: float 
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
     video_id = Path(video_path).stem
-    frames_dir = f"{FRAME_DIR}/{video_id}"
+    frames_dir = f"{VOLUME_FRAME_DIR}/{video_id}"
     os.makedirs(frames_dir, exist_ok=True)
     commit_to_vol_with_exp_backoff()
 
@@ -942,13 +942,13 @@ def video_to_text_embeddings(
     num_frames = len(frame_paths)
 
     # Check if embeddings already exist; if they do, return them
-    os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
+    os.makedirs(VOLUME_EMBEDDINGS_DIR, exist_ok=True)
     video_id = Path(frame_paths[0]).parent.name
 
     descriptions_to_compute = []
 
     gpt_embeddings_filepath = (
-        f"{EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}"
+        f"{VOLUME_EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}"
         f"-{OPENAI_VISION_MODEL}-text-embeddings.txt"
     )
     descriptions_to_compute.append((
@@ -957,7 +957,7 @@ def video_to_text_embeddings(
         frame_to_gpt_description))
 
     cohere_aya_embeddings_filepath = (
-        f"{EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}"
+        f"{VOLUME_EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}"
         "-cohere-text-embeddings.txt"
     )
     descriptions_to_compute.append((
@@ -966,7 +966,7 @@ def video_to_text_embeddings(
         frame_to_cohere_aya_description))
 
     # llama_embeddings_filepath = (
-    #     f"{EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}"
+    #     f"{VOLUME_EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}"
     #     "-llama-text-embeddings.txt"
     # )
     # descriptions_to_compute.append((
@@ -1065,7 +1065,7 @@ def video_to_cohere_image_embeddings(
     results = []
     video_id = Path(frame_paths[0]).parent.name
     cohere_image_embeddings_filepath = \
-        f"{EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}-cohere-image-embeddings.txt"
+        f"{VOLUME_EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}-cohere-image-embeddings.txt"
     if os.path.exists(cohere_image_embeddings_filepath):
         print(f"⚡️3️⃣ Found existing Cohere image embeddings from {cohere_image_embeddings_filepath} ⚡️3️⃣\n")
         return [(cohere_image_embeddings_filepath, "cohere-image-embeddings")]
@@ -1081,7 +1081,7 @@ def video_to_cohere_image_embeddings(
         raise ValueError("ERROR: No image embeddings generated for video frames\n")
 
     embeddings_list = np.vstack(embeddings_list)
-    os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
+    os.makedirs(VOLUME_EMBEDDINGS_DIR, exist_ok=True)
     vector_db = {i: (frame_paths[i], embedding) for i, embedding in enumerate(embeddings_list)}
     with open(cohere_image_embeddings_filepath, "wb") as f:
         pickle.dump(vector_db, f)
@@ -1160,7 +1160,7 @@ def run_clip_queries(
     VOL.reload()
     embeddings_source = "clip-image-embeddings"
     clip_image_embeddings_filepath = \
-        f"{EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}-clip-image-embeddings.txt"
+        f"{VOLUME_EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}-clip-image-embeddings.txt"
 
     os.makedirs(video_results_dir, exist_ok=True)
 
@@ -1469,7 +1469,7 @@ def run_queries(
 )
 def main(
     url: str,
-    query: str | list[str],
+    queries: list[str],
     num_results: int,
     gpu_count: int,
     frame_interval: float,
@@ -1489,12 +1489,7 @@ def main(
         frame_interval=frame_interval,
         video_metadata=video_metadata)
 
-    # Convert query to list if it's a single string
-    queries = [query] if isinstance(query, str) else query
-    if isinstance(query, str) and query == "":
-        queries = DEFAULT_QUERIES
-
-    # used in cache filenames to ensure we don't recompute results for sets
+    # hash of query list is used in cache filenames to ensure we don't recompute results for sets
     #  of queries we have already processed
     hash_of_queries = hash_query_list(queries)
 
@@ -1512,7 +1507,7 @@ def main(
     )
     embeddings_files_and_sources.extend(results)
 
-    video_results_dir = f"{RESULTS_DIR}/{video_id}-q={hash_of_queries}"
+    video_results_dir = f"{VOLUME_RESULTS_DIR}/{video_id}-q={hash_of_queries}"
 
     # run queries with all embeddings collections with general-purpose function
     for embeddings_file, embedding_source in embeddings_files_and_sources:
@@ -1541,7 +1536,7 @@ def main(
     )
     print(f"📩 Query results using CLIP image embeddings stored in {result_file}")
 
-    return video_results_dir, video_title
+    return video_results_dir
 
 
 def load_video_from_csv(v: int, csv_file: str, url_index : int = 2):
@@ -1620,9 +1615,13 @@ def entrypoint_from_cli(
     # shorten URL if possible
     url = shorten_yt_link(url)
 
-    remote_results_dir, video_title = main.remote(
+    # process query string into array if provided;
+    #  otherwise use default query set
+    queries = q.split(";") if q else DEFAULT_QUERIES
+
+    remote_results_dir = main.remote(
         url=url,
-        query=q,
+        queries=queries,
         num_results=n,
         gpu_count=g,
         frame_interval=i,
@@ -1631,11 +1630,12 @@ def entrypoint_from_cli(
 
     if c:
         remote_results_dir = remote_results_dir.removeprefix(MODAL_VOLUME_PATH)
+
         # Create local directory for results if it doesn't exist
-        local_results_file = "embedding-based/results/" + video_title
-        os.makedirs(local_results_file, exist_ok=True)
+        local_results_dir = "embedding-based/results/"
+        os.makedirs(local_results_dir, exist_ok=True)
 
         # Download results from Modal volume
-        cmd = f"modal volume get --force {MODAL_VOLUME_NAME} {remote_results_dir} {local_results_file}"
+        cmd = f"modal volume get --force {MODAL_VOLUME_NAME} {remote_results_dir} {local_results_dir}"
         print(f"📥 Downloading results with command:\n📥 {cmd}")
         subprocess.run(cmd, shell=True)
