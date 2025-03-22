@@ -7,10 +7,10 @@ from itertools import count, repeat
 from contextlib import nullcontext
 import torch.nn.functional as F
 from pathlib import Path
+from tqdm import tqdm
 from PIL import Image
 import numpy as np
 import subprocess
-import hashlib
 import pickle
 import yt_dlp
 import cohere
@@ -22,15 +22,22 @@ import torch
 import time
 import json
 import csv
+import sys
 import cv2
 import os
+import re
 
 # =================================================================================================
 # ⬇️ Constants & image selection
 # =================================================================================================
 
-# Set HuggingFace logging level to ERROR to suppress warnings
-# transformers_logging.set_verbosity_error()
+# Default arg values
+DEFAULT_VIDEO_URL = "https://www.youtube.com/watch?v=4M1e83JSjB4"
+DEFAULT_NUM_RESULTS = 10
+DEFAULT_NUM_GPUS = 10
+DEFAULT_FRAME_INTERVAL = 0.5
+DEFAULT_TEXT_EMBEDDING_BATCH_SIZE = 96
+VIDEOS_CSV = "../utils/test_videos.csv"
 
 # Define the Modal app
 app = modal.App("basketball-video-search")
@@ -39,9 +46,12 @@ app = modal.App("basketball-video-search")
 MODAL_VOLUME_NAME = "basketball-video-search"  # previously "basketball-analysis"
 MODAL_VOLUME_PATH = "/vol"
 VOL = modal.Volume.from_name(MODAL_VOLUME_NAME, create_if_missing=True)
+
+VOLUME_DOWNLOAD_DIR = MODAL_VOLUME_PATH + "/downloads"
 VOLUME_FRAME_DIR = MODAL_VOLUME_PATH + "/frames"
 VOLUME_EMBEDDINGS_DIR = MODAL_VOLUME_PATH + "/embeddings"
 VOLUME_RESULTS_DIR = MODAL_VOLUME_PATH + "/results"
+VOLUME_RESULTS_CACHE_DIR = MODAL_VOLUME_PATH + "/results-cache"
 
 DEFAULT_QUERIES = [
     "slam dunk at the rim",
@@ -58,18 +68,7 @@ DEFAULT_QUERIES = [
 ]
 RESULT_SEPARATOR_STRING = "========================================================\n"
 
-# Pass API keys along as secrets to containers that need them
-if modal.is_local():
-    API_KEYS_SECRET = modal.Secret.from_dict({
-        "COHERE_API_KEY": os.environ["COHERE_API_KEY"],
-        "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
-        "GROQ_API_KEY": os.environ["GROQ_API_KEY"],
-    })
-else:
-    API_KEYS_SECRET = modal.Secret.from_dict({})
-
 # Image selection
-GPU_CHOICE = "L40S:2"  # set to L40S usually
 CUDA_VERSION = "12.8.1"
 PYTHON_VERSION = "3.10"
 FLAVOR = "devel"  # includes full CUDA toolkit
@@ -84,7 +83,7 @@ COHERE_VISION_MODEL = "c4ai-aya-vision-8b"
 COHERE_EMBED_MODEL = "embed-english-v3.0"
 COHERE_RERANK_MODEL = "rerank-v3.5"
 OPENAI_EMBED_MODEL = "text-embedding-3-large"
-OPENAI_VISION_MODEL = "gpt-4.5-preview"  # gpt-4.5-preview, gpt-4o
+OPENAI_VISION_MODEL = "gpt-4o"  # gpt-4.5-preview, gpt-4o
 LLAMA_VISION_MODEL = "llama-3.2-90b-vision-preview"  # llama-3.2-11b-vision-preview, llama-3.2-3b-preview
 CLIP_MODEL_TAG = "openai/clip-vit-base-patch32"
 
@@ -96,7 +95,7 @@ SHARED_PIP_PKGS = [
     "numpy<2",
     "modal",
     "cohere",
-    "yt_dlp",
+    # "yt_dlp",
     "python-dotenv",
     "psycopg2-binary",
     "decord",
@@ -105,6 +104,7 @@ SHARED_PIP_PKGS = [
     "openai",
     "pillow",
     "transformers",
+    "tqdm",
 ]
 
 SHARED_GPU_PIP_PKGS = [
@@ -121,9 +121,9 @@ SHARED_ENV_VARS = {
 SHARED_CMDS = [
     "pip install -q --upgrade pip",
     "pip install -U cohere",
-    "pip install -q -U scikit-learn",
+    "python3 -m pip install -U --pre \"yt-dlp[default]\"",
     "apt-get -qq update",
-    "apt-get -qq -y install ffmpeg libglib2.0-0 libgl1-mesa-glx",
+    "apt-get -qq -y install curl ffmpeg libglib2.0-0 libgl1-mesa-glx",
 ]
 
 FLASH_ATTN_CMDS = [
@@ -161,11 +161,35 @@ TORCH_FLASH_ATTN_BASE_IMAGE = (
     .run_commands(*FLASH_ATTN_CMDS)
 )
 
-GPU_BASE_IMAGE = (
+REGULAR_GPU_BASE_IMAGE = (
     modal.Image
     .from_registry(NVIDIA_IMAGE, add_python=PYTHON_VERSION)
     .pip_install("transformers", extra_options="-q")
 )
+
+# Pass API keys along as secrets to containers that need them
+# and select GPU image based on whether --o (optimization flag) is present
+if modal.is_local():
+    API_KEYS_SECRET = modal.Secret.from_dict({
+        "COHERE_API_KEY": os.environ["COHERE_API_KEY"],
+        "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
+        "GROQ_API_KEY": os.environ["GROQ_API_KEY"],
+    })
+    GPU_PARAMS_SECRET = modal.Secret.from_dict({
+        "GPU_IMAGE_CHOICE": "flash-attn" if "--o" in sys.argv else "regular",
+    })
+    optimize_gpu_params : bool = ("--o" in sys.argv)
+else:
+    API_KEYS_SECRET = modal.Secret.from_dict({})
+    GPU_PARAMS_SECRET = modal.Secret.from_dict({})
+    optimize_gpu_params : bool = (os.environ.get("GPU_IMAGE_CHOICE", "") == "flash-attn")
+
+if optimize_gpu_params:
+    GPU_BASE_IMAGE = TORCH_FLASH_ATTN_BASE_IMAGE
+    GPU_CHOICE = "H100"
+else:
+    GPU_BASE_IMAGE = REGULAR_GPU_BASE_IMAGE
+    GPU_CHOICE = "L40S"
 
 GPU_IMAGE = (
     GPU_BASE_IMAGE
@@ -230,18 +254,14 @@ DESCRIPTION_PROMPT = (
 # ⬇️ Helper functions
 # =================================================================================================
 
-def hash_query_list(
-    strings: list[str],
-    prefix_to_return: int = 8,
-    algorithm='sha256'
-):
-    """
-    Hash a list of strings to a unique identifier.
-    """
-    hash_object = hashlib.new(algorithm)
-    for string in strings:
-        hash_object.update(string.encode())
-    return hash_object.hexdigest()[:prefix_to_return]
+def sanitize_filename(filename: str) -> str:
+    # Define a regex pattern for characters that are not safe for file names
+    unsafe_chars = r'[<>:"/\\&|?*]'
+
+    # Replace unsafe characters with the specified replacement character
+    sanitized_filename = re.sub(unsafe_chars, '', filename)
+    sanitized_filename_no_spaces = sanitized_filename.replace(' ', '_')
+    return sanitized_filename_no_spaces
 
 
 def shorten_yt_link(url: str) -> str:
@@ -262,17 +282,19 @@ def commit_to_vol_with_exp_backoff():
     able to handle GRPC data loss errors and other network issues
     """
     max_retries = 10
-    retry_count = 0
+    retry_count = 1
     base_delay = 2  # seconds
 
     while retry_count < max_retries:
         try:
             VOL.commit()
-            break  # successfully committed
+            if (retry_count > 1):
+                print(f"Volume commit #{retry_count} successful.")
+            break
         except Exception as e:
             retry_count += 1
             if retry_count >= max_retries:
-                print(f"💔 Failed to commit to volume after {max_retries} attempts.")
+                print(f"💔 Failed to commit to Modal volume {MODAL_VOLUME_NAME} after {max_retries} attempts.")
                 print(f"💔 Error: {type(e).__name__}: {str(e)}")
                 raise e
             else:
@@ -281,7 +303,7 @@ def commit_to_vol_with_exp_backoff():
                 for _ in range(retry_count):
                     severity += "❗"
                 print(
-                    f"{severity} Volume commit error: {type(e).__name__}."
+                    f"{severity} Volume commit error: {type(e).__name__}.\n"
                     f"Retry {retry_count}/{max_retries} after {delay:.2f}s"
                 )
                 time.sleep(delay)
@@ -318,10 +340,29 @@ def download_video_with_cache(url: str) -> Tuple[str, Dict]:
 
         # using this format will obtain 1080p video if it is available and store it in an mp4 file
         'format': 'mp3/bestvideo',
-
-        'outtmpl': MODAL_VOLUME_PATH + "/" + str('%(id)s.%(ext)s'),
-        'geo_bypass': True,          # Try to bypass geo-restrictions...
-        'geo_bypass_country': 'US',  # ...by using US as the country
+        'verbose': True,
+        # 'extractor_args': {
+        #     'youtubetab': {
+        #         'skip': 'authcheck',
+        #     },
+        # },
+        'http_headers': {
+            'User-Agent': (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/90.0.4430.93 Safari/537.36"
+            ),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1'
+        },
+        'outtmpl': VOLUME_DOWNLOAD_DIR + "/" + str('%(id)s.%(ext)s'),
     }
 
     retry_count = 0
@@ -333,7 +374,7 @@ def download_video_with_cache(url: str) -> Tuple[str, Dict]:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
                 info = ydl.extract_info(url, download=True)
-                filepath = MODAL_VOLUME_PATH + "/" + str(f"{info['id']}.{info['ext']}")
+                filepath = VOLUME_DOWNLOAD_DIR + "/" + str(f"{info['id']}.{info['ext']}")
 
                 video_height = info.get('height')
                 video_width = info.get('width')
@@ -1001,7 +1042,7 @@ def video_to_text_embeddings(
                 embeddings_filepath,))
             commit_to_vol_with_exp_backoff()
 
-    print("🟦 Generating embeddings for text descriptions 🟦\n")
+    print("🟦 Generating embeddings for text descriptions 🟦\n") if embeddings_to_compute else None
 
     for unvalidated_description_list, source_name, embeddings_filepath in embeddings_to_compute:
         # Filter out exceptions in description sets
@@ -1020,23 +1061,23 @@ def video_to_text_embeddings(
         # process the description batches into batches of embeddings
         description_batches = [(batch, i, num_batches)
                                for i, batch in enumerate(description_batches)]
-        embeddings_list = list(generate_cohere_embeddings_with_exp_backoff.map(description_batches))
+        embedding_set = list(generate_cohere_embeddings_with_exp_backoff.map(description_batches))
 
-        if not embeddings_list:
+        if not embedding_set:
             raise ValueError("ERROR: No embeddings generated for video text descriptions\n")
 
-        embeddings_list = np.vstack(embeddings_list)
+        embedding_set = np.vstack(embedding_set)
 
         # create vector db of embeddings and save it
         #   to a file to be used when processing queries
-        vector_db = {i: (frame_paths[i], embedding) for i, embedding in enumerate(embeddings_list)}
+        vector_db = {i: (frame_paths[i], embedding) for i, embedding in enumerate(embedding_set)}
         with open(embeddings_filepath, "wb") as f:
             pickle.dump(vector_db, f)
 
         commit_to_vol_with_exp_backoff()
 
         print(
-            f"📜📜 {source_name}: {embeddings_list.shape[0]} embeddings of "
+            f"📜📜 {source_name}: {embedding_set.shape[0]} embeddings of "
             f"frame descriptions saved in {embeddings_filepath}\n"
         )
 
@@ -1075,21 +1116,21 @@ def video_to_cohere_image_embeddings(
     print(f"🟥🟥 Generating Cohere image embeddings for video {video_id} 🟥🟥\n")
     num_frames = len(encoded_images)
     frame_strings = [(encoded_image, i, num_frames) for i, encoded_image in enumerate(encoded_images)]
-    embeddings_list = list(generate_cohere_embeddings_with_exp_backoff.map(frame_strings))
+    embedding_set = list(generate_cohere_embeddings_with_exp_backoff.map(frame_strings))
 
-    if not embeddings_list:
+    if not embedding_set:
         raise ValueError("ERROR: No image embeddings generated for video frames\n")
 
-    embeddings_list = np.vstack(embeddings_list)
+    embedding_set = np.vstack(embedding_set)
     os.makedirs(VOLUME_EMBEDDINGS_DIR, exist_ok=True)
-    vector_db = {i: (frame_paths[i], embedding) for i, embedding in enumerate(embeddings_list)}
+    vector_db = {i: (frame_paths[i], embedding) for i, embedding in enumerate(embedding_set)}
     with open(cohere_image_embeddings_filepath, "wb") as f:
         pickle.dump(vector_db, f)
 
     commit_to_vol_with_exp_backoff()
 
     print(
-        f"🖼️🖼️ Saved {embeddings_list.shape[0]} Cohere image embeddings "
+        f"🖼️🖼️ Saved {embedding_set.shape[0]} Cohere image embeddings "
         f"to {cohere_image_embeddings_filepath}\n"
     )
     results.append((cohere_image_embeddings_filepath, "cohere-image-embeddings"))
@@ -1102,7 +1143,12 @@ def video_to_cohere_image_embeddings(
 # ⬇️ Performing queries given embeddings
 # =================================================================================================
 
-@app.function(image=GPU_IMAGE, gpu=GPU_CHOICE, volumes={MODAL_VOLUME_PATH: VOL}, timeout=10000)
+@app.function(
+    secrets=[GPU_PARAMS_SECRET],
+    image=GPU_IMAGE,
+    gpu=GPU_CHOICE,
+    volumes={MODAL_VOLUME_PATH: VOL},
+    timeout=10000)
 def frame_to_clip_image_embedding(
     clip_processor,
     clip_model,
@@ -1124,7 +1170,12 @@ def frame_to_clip_image_embedding(
     return normalized_embedding
 
 
-@app.function(image=GPU_IMAGE, gpu=GPU_CHOICE, volumes={MODAL_VOLUME_PATH: VOL}, timeout=10000)
+@app.function(
+    secrets=[GPU_PARAMS_SECRET],
+    image=GPU_IMAGE,
+    gpu=GPU_CHOICE,
+    volumes={MODAL_VOLUME_PATH: VOL},
+    timeout=10000)
 def compute_clip_text_embedding(clip_processor, clip_model, query, flash_attn_available, device):
     print(f"5️⃣ Computing CLIP embedding for query \"{query}\"\n")
     # convert query into a PyTorch tensor
@@ -1146,7 +1197,13 @@ def compute_clip_text_embedding(clip_processor, clip_model, query, flash_attn_av
     return text_embedding
 
 
-@app.function(image=GPU_IMAGE, gpu=GPU_CHOICE, volumes={MODAL_VOLUME_PATH: VOL}, timeout=10000)
+@app.function(
+    secrets=[GPU_PARAMS_SECRET],
+    image=GPU_IMAGE,
+    gpu=GPU_CHOICE,
+    volumes={MODAL_VOLUME_PATH: VOL},
+    timeout=10000
+)
 def run_clip_queries(
     queries: list[str],
     frame_paths: List[str],
@@ -1155,17 +1212,38 @@ def run_clip_queries(
     video_url: str,
     video_title: str,
     video_id: str,
-    video_results_dir: str,
+    video_results_cache_dir: str,
 ):
     VOL.reload()
     embeddings_source = "clip-image-embeddings"
     clip_image_embeddings_filepath = \
         f"{VOLUME_EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}-clip-image-embeddings.txt"
 
-    os.makedirs(video_results_dir, exist_ok=True)
+    os.makedirs(video_results_cache_dir, exist_ok=True)
 
     # include hash of query list in name of cached file to avoid recomputing results
-    result_outputfile = f"{video_results_dir}/{embeddings_source}-results.txt"
+    filename_safe_queries = [sanitize_filename(query) for query in queries]
+    query_output_file_names = [
+        (
+            f"{video_results_cache_dir}/"
+            f"q=\"{filename_safe_query}\""
+            f"-i=\"{frame_interval}\""
+            f"-n=\"{num_results}\""
+            f"-e=\"{embeddings_source}\""
+            ".txt"
+        )
+        for filename_safe_query in filename_safe_queries
+    ]
+
+    unprocessed_queries = []
+    for i, query in enumerate(queries):
+        if os.path.exists(query_output_file_names[i]):
+            print(f"⚡️5️⃣ Found existing CLIP results for query {query} in {query_output_file_names[i]} ⚡️5️⃣\n")
+        else:
+            unprocessed_queries.append(query)
+    if not unprocessed_queries:
+        return query_output_file_names
+    queries = unprocessed_queries
 
     def cosine_similarity(a, b):
         return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
@@ -1194,7 +1272,7 @@ def run_clip_queries(
     try:
         import flash_attn
         flash_attn_available = True
-        print("5️⃣ flash-attn is installed, using it for CLIP model 5️⃣\n")
+        print("5️⃣🟩🟩 flash-attn is installed, using it for CLIP model 🟩🟩5️⃣\n")
         clip_model_load_args["attn_implementation"] = "flash_attention_2"
         clip_model_load_args["device_map"] = "cuda"
         clip_model_load_args["torch_dtype"] = torch.float16
@@ -1205,9 +1283,9 @@ def run_clip_queries(
         "clip_model": lambda: CLIPModel.from_pretrained(**clip_model_load_args).to('cuda'),
         "clip_processor": lambda: CLIPProcessor.from_pretrained(CLIP_MODEL_TAG),
     })
+    clip_model, clip_processor = components["clip_model"], components["clip_processor"]
 
     print("5️⃣ CLIP model and processor loaded 5️⃣\n")
-    clip_model, clip_processor = components["clip_model"], components["clip_processor"]
     images = [Image.open(frame_path) for frame_path in frame_paths]
 
     result_string = f"🔍🔍 Results for:\n🔍🔍 Video: {video_title}\n🔍🔍 URL: {video_url}\n"
@@ -1226,6 +1304,7 @@ def run_clip_queries(
         else:
             print(f"5️⃣ Computing frame embeddings using CLIP model for {video_id} 5️⃣\n")
             all_image_embeddings = []
+
             num_images = len(images)
             all_image_embeddings = [frame_to_clip_image_embedding.local(
                 clip_processor=clip_processor,
@@ -1238,13 +1317,18 @@ def run_clip_queries(
             ) for i, image in enumerate(images)]
             image_embeddings = np.vstack(all_image_embeddings)
             np.save(clip_image_embeddings_filepath, image_embeddings)
+    else:
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory  # in bytes
+        image_size_in_bytes = np.prod(images[0].size) * 3  # 3 bytes per RGB pixel
+        batch_size = int(gpu_memory / image_size_in_bytes)
+        print(f"🟪🟪5️⃣ Batch size is {batch_size} = ({gpu_memory}/{image_size_in_bytes}) 5️⃣🟪🟪")
 
     # handle individual queries
-    for i, query in enumerate(queries):
-        print(f"5️⃣ Processing query {queries[i]} ({i+1}/{len(queries)}) with CLIP model\n")
+    for i, query in enumerate(tqdm(queries, desc="🔆5️⃣ Processing queries with CLIP embeddings 5️⃣🔆")):
+        print(f"5️⃣ Processing query {queries[i]} ({i+1}/{len(queries)}\n")
+        result_output_file = query_output_file_names[i]
 
         if not flash_attn_available:
-            print("🟨🟨5️⃣ Calculating similarities naively 5️⃣🟨🟨\n")
             query_embedding = compute_clip_text_embedding.local(
                 clip_processor=clip_processor,
                 clip_model=clip_model,
@@ -1253,13 +1337,12 @@ def run_clip_queries(
                 device='cuda',
             )
             similarities = [cosine_similarity(query_embedding, embedding)
-                            for embedding in image_embeddings]
+                            for embedding in tqdm(image_embeddings, desc="🟨5️⃣ Calculating similarities naively 5️⃣🟨")]
 
         else:
-            print("🟩🟩5️⃣ Calculating similarities with flash-attention on GPU 5️⃣🟩🟩\n")
             # Process images in batches
             similarities = []
-            batch_size = len(images)
+
             for batch_start in range(0, len(images), batch_size):
                 batch_end = min(batch_start + batch_size, len(images))
                 batch_images = images[batch_start:batch_end]
@@ -1279,16 +1362,18 @@ def run_clip_queries(
                     # move each tensor returned above to the GPU
                     inputs = {k: v.to('cuda') for k, v in inputs.items()}
 
+                    batch_string = f"[{batch_start}:{batch_end}]"
+
                     # Use autocast for mixed precision if available
                     with torch.autocast('cuda'):
+                        print(f"  ♻️5️⃣ Batch computing embeddings w/ CLIP for images {batch_string}... 5️⃣♻️\n")
                         outputs = clip_model(**inputs)
 
-                    batch_string = f"[{batch_start}:{batch_end}]"
                     print(f"  ♻️5️⃣ Computing similarities for images {batch_string}... 5️⃣♻️\n")
 
                     # Get similarity scores directly from the model
                     batch_similarities = outputs.logits_per_image.squeeze(1).cpu().numpy()
-                    print(f"  🟩5️⃣ {batch_string} similarities computed! 5️⃣🟩\n")
+                    print(f"  🟩5️⃣ Similarities for images {batch_string} computed! 5️⃣🟩\n")
                     similarities.extend(batch_similarities)
 
         similarities = np.array(similarities)
@@ -1328,64 +1413,19 @@ def run_clip_queries(
             f"to {max(similarities):.3f}\n")
         result_string += RESULT_SEPARATOR_STRING
 
-    print(f"5️⃣ Writing results of processing queries with CLIP model to {result_outputfile} \n")
-    with open(result_outputfile, "w") as f:
-        print(result_string)
-        f.write(result_string)
+        with open(result_output_file, "w") as f:
+            f.write(f"🔍🔍 Query: {query}\n🔍🔍 Results from searching through source: {embeddings_source}\n")
+            f.write(RESULT_SEPARATOR_STRING)
+            f.write(result_string)
+            f.write(RESULT_SEPARATOR_STRING)
+
     commit_to_vol_with_exp_backoff()
-    return result_outputfile
+
+    return query_output_file_names
 
 
-@app.function(image=CPU_IMAGE, volumes={MODAL_VOLUME_PATH: VOL}, timeout=10000)
-def run_single_query(
-    query_embedding,    # embedding of the query
-    embeddings_list,    # list of embeddings to compare against
-    embeddings_vector,  # dict from index to (path, embedding)
-    query_string: str,  # query string (to use in result output)
-    video_url : str,    # [YouTube] URL to the video
-    embeddings_source: str,  # method that generated the embeddings (to use in result output)
-    num_results: int,
-):
-    VOL.reload()
-
-    print(f"➡️➡️➡️ Running query for {query_string} using {embeddings_source}\n")
-
-    similarity_metric_name = "cosine similarity"
-
-    def cosine_similarity(a, b):
-        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-    similarities = [cosine_similarity(query_embedding, embedding) for embedding in embeddings_list]
-    top_indices = np.argsort(similarities)[::-1][:num_results]
-
-    result_string = ""
-    result_string += (
-        f"📂 Results for:\n📂 Query: {query_string}\n📂 Embeddings source: {embeddings_source}\n"
-    )
-    for i, idx in enumerate(top_indices):
-        path, _ = embeddings_vector[idx]
-        # Extract timestamp from path
-        frame_name = Path(path).name
-
-        # Extract timestamp components from filename (frame_MM_SS_MS.jpg)
-        if frame_name.startswith("frame-"):
-            parts = frame_name.split("-")
-            minutes = parts[1]
-            seconds = parts[2]
-            milliseconds = parts[3].split(".")[0]
-            timestamp = f"{int(minutes)}:{seconds}.{milliseconds}"
-            timestamp_in_seconds = int(minutes) * 60 + int(seconds)
-            url_to_frame = video_url + "&t=" + str(timestamp_in_seconds) + "s"
-            result_string += f"{i+1}: {timestamp} ({url_to_frame})"
-            result_string += f" - similarity: {similarities[idx]:.3f}"
-        else:
-            result_string += f"{i+1}: {path} - similarity: {similarities[idx]:.3f}"
-        result_string += "\n"
-
-    result_string += f"\n🎭 Similarity metric used: {similarity_metric_name}\n"
-    result_string += f"🎭 Similarity scores ranged from {min(similarities):.3f} to {max(similarities):.3f}\n"
-    result_string += RESULT_SEPARATOR_STRING
-    return result_string
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 
 @app.function(
@@ -1394,17 +1434,18 @@ def run_single_query(
     timeout=10000,
     secrets=[API_KEYS_SECRET]
 )
-def run_queries(
+def run_queries_with_embedding_set(
     video_url: str,
-    video_title: str,
-    video_results_dir: str,
+    video_results_cache_dir: str,
     embeddings_file: str,
     embeddings_source: str,
     queries: list[str],
     num_results: int,
+    frame_interval: int,
 ) -> str:  # returns path to result file
 
     VOL.reload()
+
     print(f"🔍 Attempting to use {embeddings_source} embeddings to run queries \n")
     # Load embeddings
     try:
@@ -1413,13 +1454,22 @@ def run_queries(
     except Exception as e:
         print(f"Error loading embeddings from {embeddings_file}: {str(e)}")
         return []
-    embeddings_list = [kvp[1][1] for kvp in embeddings_vector.items()]
+    embedding_set = [kvp[1][1] for kvp in embeddings_vector.items()]
     print("⚡️4️⃣ Embeddings loaded from file successfully ⚡️4️⃣\n")
 
-    os.makedirs(video_results_dir, exist_ok=True)
-
-    # include hash of query list in name of cached file to avoid recomputing results
-    result_outputfile = f"{video_results_dir}/{embeddings_source}-results.txt"
+    os.makedirs(video_results_cache_dir, exist_ok=True)
+    filename_safe_queries = [sanitize_filename(query) for query in queries]
+    query_output_file_names = [
+        (
+            f"{video_results_cache_dir}/"
+            f"q=\"{filename_safe_query}\""
+            f"-i=\"{frame_interval}\""
+            f"-n=\"{num_results}\""
+            f"-e=\"{embeddings_source}\""
+            ".txt"
+        )
+        for filename_safe_query in filename_safe_queries
+    ]
 
     # Initialize Cohere client
     co = cohere.Client(os.environ.get("COHERE_API_KEY"))
@@ -1434,26 +1484,57 @@ def run_queries(
     query_embeddings = response.embeddings.float
 
     # actual query processing occurs here
-    query_result_strings = list(run_single_query.map(
-        query_embeddings,
-        repeat(embeddings_list),
-        repeat(embeddings_vector),
-        queries,
-        repeat(video_url),
-        repeat(embeddings_source),
-        repeat(num_results),
-    ))
+    # note results will be in order of the queries
+    for i, query in enumerate(queries):
+        query_output_file = query_output_file_names[i]
 
-    with open(result_outputfile, "w") as f:
-        f.write(f"🔍🔍 Results for:\n🔍🔍 Video: {video_title}\n🔍🔍 URL: {video_url}\n")
-        f.write(RESULT_SEPARATOR_STRING)
-        for string in query_result_strings:
-            print(string)
-            f.write(string)
+        if os.path.exists(query_output_file):
+            print(f"⚡️4️⃣ Found existing {embeddings_source} results for {query} at {query_output_file} ⚡️4️⃣\n")
+            continue
+
+        print(f"➡️➡️➡️ Running query for {query} using {embeddings_source}\n")
+        query_embedding = query_embeddings[i]
+        similarity_scores = [cosine_similarity(query_embedding, embedding) for embedding in embedding_set]
+        top_indices = np.argsort(similarity_scores)[::-1][:num_results]
+
+        result_string = ""
+        result_string += (
+            f"📂 Results for:\n📂 Query: {query}\n📂 Embeddings source: {embeddings_source}\n"
+        )
+        for i, idx in enumerate(top_indices):
+            path, _ = embeddings_vector[idx]
+            # Extract timestamp from path
+            frame_name = Path(path).name
+
+            # Extract timestamp components from filename (frame_MM_SS_MS.jpg)
+            if frame_name.startswith("frame-"):
+                parts = frame_name.split("-")
+                minutes = parts[1]
+                seconds = parts[2]
+                milliseconds = parts[3].split(".")[0]
+                timestamp = f"{int(minutes)}:{seconds}.{milliseconds}"
+                timestamp_in_seconds = int(minutes) * 60 + int(seconds)
+                url_to_frame = video_url + "&t=" + str(timestamp_in_seconds) + "s"
+                result_string += f"{i+1}: {timestamp} ({url_to_frame})"
+                result_string += f" - similarity: {similarity_scores[idx]:.3f}"
+            else:
+                result_string += f"{i+1}: {path} - similarity: {similarity_scores[idx]:.3f}"
+            result_string += "\n"
+        result_string += "\n🎭 Similarity metric used: cosine similarity\n"
+        result_string += (
+            f"🎭 Similarity scores ranged from {min(similarity_scores):.3f} "
+            f"to {max(similarity_scores):.3f}\n"
+        )
+
+        with open(query_output_file, "w") as f:
+            f.write(f"🔍🔍 Query: {query}\n🔍🔍 Results from searching through source: {embeddings_source}\n")
+            f.write(RESULT_SEPARATOR_STRING)
+            f.write(result_string)
+            f.write(RESULT_SEPARATOR_STRING)
 
     commit_to_vol_with_exp_backoff()
 
-    return result_outputfile
+    return query_output_file_names
 
 
 # =================================================================================================
@@ -1489,10 +1570,6 @@ def main(
         frame_interval=frame_interval,
         video_metadata=video_metadata)
 
-    # hash of query list is used in cache filenames to ensure we don't recompute results for sets
-    #  of queries we have already processed
-    hash_of_queries = hash_query_list(queries)
-
     embeddings_files_and_sources = []
     results = video_to_text_embeddings.remote(
         frame_paths=frame_paths,
@@ -1507,34 +1584,56 @@ def main(
     )
     embeddings_files_and_sources.extend(results)
 
-    video_results_dir = f"{VOLUME_RESULTS_DIR}/{video_id}-q={hash_of_queries}"
+    video_title_dir = sanitize_filename(video_title)
+    video_results_cache_dir = f"{VOLUME_RESULTS_CACHE_DIR}/{video_title_dir}"
+    video_results_dir = f"{VOLUME_RESULTS_DIR}/{video_title_dir}"
+    os.makedirs(video_results_cache_dir, exist_ok=True)
+    os.makedirs(video_results_dir, exist_ok=True)
+
+    all_query_output_files = []
 
     # run queries with all embeddings collections with general-purpose function
     for embeddings_file, embedding_source in embeddings_files_and_sources:
-        result_file = run_queries.remote(
+        query_output_files = run_queries_with_embedding_set.remote(
             url,
-            video_metadata['title'],
-            video_results_dir,
+            video_results_cache_dir,
             embeddings_file,
             embedding_source,
             queries,
             num_results,
+            frame_interval,
         )
-
-        print(f"📩 Query results using {embedding_source} stored in {result_file}")
+        all_query_output_files.extend(query_output_files)
 
     # run custom-written function for computing and then searching through CLIP embeddings
-    result_file = run_clip_queries.remote(
+    query_output_files = run_clip_queries.remote(
         queries=queries,
         frame_paths=frame_paths,
         frame_interval=frame_interval,
         num_results=num_results,
         video_url=url,
         video_title=video_metadata['title'],
-        video_results_dir=video_results_dir,
+        video_results_cache_dir=video_results_cache_dir,
         video_id=video_id,
     )
-    print(f"📩 Query results using CLIP image embeddings stored in {result_file}")
+    all_query_output_files.extend(query_output_files)
+
+    VOL.reload()
+
+    #  concatenate results for a query, from all embedding sources, together in one file
+    for file in tqdm(all_query_output_files, desc="📜 Concatenating result files by query"):
+        # removes the name of the embedding source from the file stem
+        filestem = Path(file).stem
+        new_filestem = filestem[:filestem.find("-e=")]
+        result_file = f"{video_results_dir}/{new_filestem}.txt"
+
+        with open(file, "r") as f:
+            with open(result_file, "a") as f_out:
+                f_out.write(f.read())
+
+    commit_to_vol_with_exp_backoff()
+
+    print(f"📩 All query results stored in {video_results_dir} on Modal volume {MODAL_VOLUME_NAME}")
 
     return video_results_dir
 
@@ -1576,36 +1675,39 @@ def load_video_from_csv(v: int, csv_file: str, url_index : int = 2):
 @app.local_entrypoint()
 def entrypoint_from_cli(
     # basketball video footage to ingest
-    u: str = "https://www.youtube.com/watch?v=4M1e83JSjB4",
+    u: str = DEFAULT_VIDEO_URL,
 
     # what we are looking for in the basketball video
     # (if unset, will default to list of default queries in DEFAULT_QUERIES)
     q: str = "",
 
     # number of results to generate per query
-    n: int = 10,
+    n: int = DEFAULT_NUM_RESULTS,
 
     # number of gpus available to use
-    g: int = 10,
+    g: int = DEFAULT_NUM_GPUS,
 
     # interval (in seconds) in between each frame that is sampled
     # note: this value shouldn't be under ~1/[video FPS rate]
     # e.g. for a 30 FPS video, this value should be >= 1/30 = 0.033
-    i: float = 0.5,
+    i: float = DEFAULT_FRAME_INTERVAL,
 
     # batch size of descriptions to embed at once
     # max batch size for Cohere is 96
     # max batch size for OpenAI is 2048
-    b: int = 96,
+    b: int = DEFAULT_TEXT_EMBEDDING_BATCH_SIZE,
 
     # if set to > 0, will load video v from test_videos.csv and use it as input
     v: int = 0,
 
     # csv file to load video from if the above option (--v) is set
-    csv: str = "../utils/test_videos.csv",
+    csv: str = VIDEOS_CSV,
 
     # if set, will copy the result file to results/{video_id} in the local filesystem
     c: bool = False,
+
+    # if set, will use optimized image w/ flash-attn when running CLIP model
+    o: bool = False,
 ):
     # load URL from CSV (if so specified), otherwise from --u arg
     if v > 0:
@@ -1618,6 +1720,9 @@ def entrypoint_from_cli(
     # process query string into array if provided;
     #  otherwise use default query set
     queries = q.split(";") if q else DEFAULT_QUERIES
+
+    if o:
+        print("🌟 Using optimized GPU image with flash-attn for CLIP model 🌟")
 
     remote_results_dir = main.remote(
         url=url,
@@ -1632,7 +1737,7 @@ def entrypoint_from_cli(
         remote_results_dir = remote_results_dir.removeprefix(MODAL_VOLUME_PATH)
 
         # Create local directory for results if it doesn't exist
-        local_results_dir = "embedding-based/results/"
+        local_results_dir = "results/"
         os.makedirs(local_results_dir, exist_ok=True)
 
         # Download results from Modal volume
