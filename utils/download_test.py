@@ -63,6 +63,9 @@ ydl_opts = {
     'extractor_args': {
         'youtubetab': {
             'skip': 'authcheck',
+        },
+        'youtube': {
+            'player_client': ["default", "ios"],
         }
     },
     'outtmpl': args.output if args.output else '%(title)s.%(ext)s',
@@ -92,3 +95,4 @@ with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         print("\nError message:", e.msg)
         print('\nExiting...')
         exit(0)
+
