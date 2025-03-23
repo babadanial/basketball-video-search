@@ -6,9 +6,10 @@ from typing import Dict, Tuple, List
 from itertools import count, repeat
 from contextlib import nullcontext
 import torch.nn.functional as F
+from datetime import datetime
 from pathlib import Path
-from tqdm import tqdm
 from PIL import Image
+from tqdm import tqdm
 import numpy as np
 import subprocess
 import pickle
@@ -19,6 +20,7 @@ import random
 import modal
 import httpx
 import torch
+import pytz
 import time
 import json
 import csv
@@ -37,7 +39,11 @@ DEFAULT_NUM_RESULTS = 10
 DEFAULT_NUM_GPUS = 10
 DEFAULT_FRAME_INTERVAL = 0.5
 DEFAULT_TEXT_EMBEDDING_BATCH_SIZE = 96
-VIDEOS_CSV = "../utils/test_videos.csv"
+
+# paths in this file are specified relative to the project root (rather than src/)
+#   since this file is executed from the project root using the wrapper/launcher script
+VIDEOS_CSV = "utils/test_videos.csv"
+YT_COOKIES_FILE = "utils/cookies.txt"
 
 # Define the Modal app
 app = modal.App("basketball-video-search")
@@ -66,7 +72,11 @@ DEFAULT_QUERIES = [
     "Nikola Jokic",
     "celebration",
 ]
-RESULT_SEPARATOR_STRING = "========================================================\n"
+RESULT_SEPARATOR_STRING = (
+    "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n"
+    "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n"
+)
+TITLE_SEPARATOR_STRING = "==============================================================================\n"
 
 # Image selection
 CUDA_VERSION = "12.8.1"
@@ -105,6 +115,7 @@ SHARED_PIP_PKGS = [
     "pillow",
     "transformers",
     "tqdm",
+    "pytz",
 ]
 
 SHARED_GPU_PIP_PKGS = [
@@ -132,7 +143,7 @@ FLASH_ATTN_CMDS = [
 ]
 
 LOCAL_FILE_MAPPINGS = [
-    ["../utils/cookies.txt", "/root/cookies.txt"],
+    [YT_COOKIES_FILE, "/root/cookies.txt"],
 ]
 
 LOCAL_PYTHON_MODULES = [
@@ -253,6 +264,19 @@ DESCRIPTION_PROMPT = (
 #
 # ⬇️ Helper functions
 # =================================================================================================
+
+def get_formatted_datetime():
+    # get the current time in UTC
+    utc_now = datetime.now(pytz.utc)
+
+    # convert to timezone
+    local_tz = pytz.timezone('America/Toronto')
+    local_now = utc_now.astimezone(local_tz)
+
+    # format datetime string
+    formatted_datetime = local_now.strftime('%Y-%m-%d %H:%M:%S %Z (%z)')
+    return formatted_datetime
+
 
 def sanitize_filename(filename: str) -> str:
     # Define a regex pattern for characters that are not safe for file names
@@ -540,7 +564,9 @@ def extract_frames(video_path: str, video_metadata: dict, frame_interval: float 
     # Extract frames
     inputs = [(video_path, frames_dir, timestamp, width, height, index, num_frames_to_extract)
               for index, timestamp in enumerate(timestamps)]
+
     frame_paths = list(extract_single_frame.map(inputs))
+
     print(f"✅✅✅ Extracted {len(frame_paths)} frames from {video_path} to {frames_dir} ✅✅✅\n")
 
     commit_to_vol_with_exp_backoff()
@@ -588,7 +614,7 @@ def frame_to_cohere_aya_description(
         with open(description_file, "r") as f:
             return f.read()
     else:
-        print(f"🍎 Getting Cohere Aya description of {frame_name} - ({frame_index}/{num_frames}) 🍎\n")
+        print(f"🍎 Getting Cohere Aya description of {frame_name}\n")
 
     # Create client for just this frame (more efficient than sharing)
     client = cohere.ClientV2(os.environ["COHERE_API_KEY"])
@@ -628,10 +654,7 @@ def frame_to_cohere_aya_description(
                 f.write(description)
 
             commit_to_vol_with_exp_backoff()
-            print(
-                f"✅🍎 Got Cohere Aya description of {frame_name} ({frame_index}/{num_frames});\n"
-                f"✅🍎 Saved to {description_file}\n"
-            )
+            print(f"✅🍎 Saved Cohere Aya description to {description_file}\n")
             return description
 
         except TooManyRequestsError:
@@ -714,10 +737,7 @@ def frame_to_llama_description(
                 f.write(description)
 
             commit_to_vol_with_exp_backoff()
-            print(
-                f"✅🍊 Got Llama description of {frame_name} ({frame_index}/{num_frames}); "
-                f"✅🍊 Saved to {description_file}\n"
-            )
+            print(f"✅🍊 Saved Llama description to {description_file}\n")
             return description
 
         except (InternalServerError, APIConnectionError) as e:
@@ -808,9 +828,7 @@ def frame_to_gpt_description(
                 f.write(description)
 
             commit_to_vol_with_exp_backoff()
-            print(
-                f"✅🍋 Got GPT description of {frame_name} ({frame_index}/{num_frames});\n"
-                f"✅🍋 Saved to {description_file}\n")
+            print(f"✅🍋 Saved GPT description to {description_file}\n")
             return description
         except (APIConnectionError, InternalServerError) as e:
             if isinstance(e, APIConnectionError):
@@ -1028,12 +1046,11 @@ def video_to_text_embeddings(
             result_file_and_source_tuples.append((embeddings_filepath, source_name))
         else:
             # map frame paths to descriptions using the Modal function provided
-            description_list = list(
-                frame_to_description_modal_func.map(
-                    frame_paths,
-                    count(1, 1),
-                    repeat(num_frames),
-                    return_exceptions=True))
+            description_list = list(frame_to_description_modal_func.map(
+                frame_paths,
+                count(1, 1),
+                repeat(num_frames),
+                return_exceptions=True))
 
             print(f"🟢🟢🟢 {source_name} - successfully computed all descriptions from frames 🟢🟢🟢")
             embeddings_to_compute.append((
@@ -1058,14 +1075,13 @@ def video_to_text_embeddings(
                                for i in range(0, len(description_list), batch_size)]
         num_batches = len(description_batches)
 
-        # process the description batches into batches of embeddings
+        # process the description batches into batches of embeddings and vstack them into a single array
         description_batches = [(batch, i, num_batches)
                                for i, batch in enumerate(description_batches)]
-        embedding_set = list(generate_cohere_embeddings_with_exp_backoff.map(description_batches))
-
+        embedding_set = list(
+            generate_cohere_embeddings_with_exp_backoff.map(description_batches))
         if not embedding_set:
             raise ValueError("ERROR: No embeddings generated for video text descriptions\n")
-
         embedding_set = np.vstack(embedding_set)
 
         # create vector db of embeddings and save it
@@ -1149,25 +1165,20 @@ def video_to_cohere_image_embeddings(
     gpu=GPU_CHOICE,
     volumes={MODAL_VOLUME_PATH: VOL},
     timeout=10000)
-def frame_to_clip_image_embedding(
-    clip_processor,
-    clip_model,
-    image,
-    device,
-    flash_attn_available,
-    i: int,
-    num_images: int
-):
-    frame_log_val = f"{i+1}/{num_images}"
-    print(f"5️⃣ Computing CLIP embedding for frame {frame_log_val}\n")
-    image_inputs = clip_processor(images=image, return_tensors="pt")
+# used to compute image embeddings when flash-attn is not being used
+def frame_to_clip_image_embeddings(clip_processor, clip_model, images, device, flash_attn_available):
+    # Produce PyTorch tensors from the image batch
+    image_inputs = clip_processor(images=images, return_tensors="pt")
+    # Move the tensor batch to the GPU
     pixel_values = image_inputs['pixel_values'].to('cuda')
+
     with torch.no_grad():
-        with torch.autocast(device) if flash_attn_available else nullcontext():
-            image_embedding = clip_model.get_image_features(pixel_values)
-        normalized_embedding = F.normalize(image_embedding, p=2, dim=-1).cpu().numpy()
-    print(f"5️⃣ CLIP embedding for frame {frame_log_val} computed! 🎉🪩🎉\n")
-    return normalized_embedding
+        with torch.autocast(device) if flash_attn_available else nullcontext():  # for maintainability
+            # Generate embeddings for the image input tensor batch using the CLIP model
+            image_embeddings = clip_model.get_image_features(pixel_values)
+        normalized_embeddings = F.normalize(image_embeddings, p=2, dim=-1).cpu().numpy()
+
+    return normalized_embeddings
 
 
 @app.function(
@@ -1176,6 +1187,7 @@ def frame_to_clip_image_embedding(
     gpu=GPU_CHOICE,
     volumes={MODAL_VOLUME_PATH: VOL},
     timeout=10000)
+# used to compute text embedding (e.g. of a query) when flash-attn is not being used
 def compute_clip_text_embedding(clip_processor, clip_model, query, flash_attn_available, device):
     print(f"5️⃣ Computing CLIP embedding for query \"{query}\"\n")
     # convert query into a PyTorch tensor
@@ -1186,7 +1198,7 @@ def compute_clip_text_embedding(clip_processor, clip_model, query, flash_attn_av
 
     # generate embeddings for text input tensors using the CLIP model
     with torch.no_grad():
-        with torch.autocast(device) if flash_attn_available else nullcontext():
+        with torch.autocast(device) if flash_attn_available else nullcontext():  # for maintainability
             text_embedding = clip_model.get_text_features(**query_inputs)
 
     # normalize the embeddings using Euclidean norm (p=2) along the last dimension (dim=-1)
@@ -1204,7 +1216,7 @@ def compute_clip_text_embedding(clip_processor, clip_model, query, flash_attn_av
     volumes={MODAL_VOLUME_PATH: VOL},
     timeout=10000
 )
-def run_clip_queries(
+def run_queries_with_clip(
     queries: list[str],
     frame_paths: List[str],
     frame_interval: float,
@@ -1221,7 +1233,8 @@ def run_clip_queries(
 
     os.makedirs(video_results_cache_dir, exist_ok=True)
 
-    # include hash of query list in name of cached file to avoid recomputing results
+    # include processing parameters (frame sampling interval, result count, etc.)
+    #   in name of cached file to avoid recomputing results
     filename_safe_queries = [sanitize_filename(query) for query in queries]
     query_output_file_names = [
         (
@@ -1235,6 +1248,8 @@ def run_clip_queries(
         for filename_safe_query in filename_safe_queries
     ]
 
+    # check for existing results; if all results have been computed already,
+    #   return immediately without even loading the CLIP model
     unprocessed_queries = []
     for i, query in enumerate(queries):
         if os.path.exists(query_output_file_names[i]):
@@ -1249,6 +1264,7 @@ def run_clip_queries(
         return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
     similarity_metric_name = "cosine similarity"
 
+    # function to load CLIP model and processor concurrently for efficiency
     def load_models_concurrently(load_functions_map: dict) -> dict:
         model_id_to_model = {}
         with ThreadPoolExecutor(max_workers=len(load_functions_map)) as executor:
@@ -1279,6 +1295,7 @@ def run_clip_queries(
     except ImportError:
         print("5️⃣ flash-attn not found, continuing with standard attention 5️⃣\n")
 
+    # load the model and processor & open images
     components = load_models_concurrently({
         "clip_model": lambda: CLIPModel.from_pretrained(**clip_model_load_args).to('cuda'),
         "clip_processor": lambda: CLIPProcessor.from_pretrained(CLIP_MODEL_TAG),
@@ -1287,10 +1304,6 @@ def run_clip_queries(
 
     print("5️⃣ CLIP model and processor loaded 5️⃣\n")
     images = [Image.open(frame_path) for frame_path in frame_paths]
-
-    result_string = f"🔍🔍 Results for:\n🔍🔍 Video: {video_title}\n🔍🔍 URL: {video_url}\n"
-    result_string += f"🔍🔍 Embeddings source: {embeddings_source}\n"
-    result_string += RESULT_SEPARATOR_STRING
 
     # compute embeddings separately if we're not processing using flash-attn
     #   directly on GPU
@@ -1303,32 +1316,31 @@ def run_clip_queries(
 
         else:
             print(f"5️⃣ Computing frame embeddings using CLIP model for {video_id} 5️⃣\n")
-            all_image_embeddings = []
+            frame_to_clip_image_embeddings.local(
+                clip_processor,
+                clip_model,
+                images,
+                'cuda',
+                flash_attn_available)
 
-            num_images = len(images)
-            all_image_embeddings = [frame_to_clip_image_embedding.local(
-                clip_processor=clip_processor,
-                clip_model=clip_model,
-                image=image,
-                i=i,
-                num_images=num_images,
-                flash_attn_available=flash_attn_available,
-                device='cuda',
-            ) for i, image in enumerate(images)]
-            image_embeddings = np.vstack(all_image_embeddings)
+            image_embeddings = np.vstack(image_embeddings)
             np.save(clip_image_embeddings_filepath, image_embeddings)
     else:
+        # --- TODO: implement multi-query processing when batch_size > len(images) ---
         gpu_memory = torch.cuda.get_device_properties(0).total_memory  # in bytes
         image_size_in_bytes = np.prod(images[0].size) * 3  # 3 bytes per RGB pixel
         batch_size = int(gpu_memory / image_size_in_bytes)
-        print(f"🟪🟪5️⃣ Batch size is {batch_size} = ({gpu_memory}/{image_size_in_bytes}) 5️⃣🟪🟪")
+        print(f"🟪🟪5️⃣ Batch size is {batch_size}")
+        print(f"🟪🟪5️⃣   = ( {gpu_memory} bytes in GPU memory ÷ {image_size_in_bytes} bytes per image)")
 
-    # handle individual queries
+    # handle each query individually, writing each to the filename designated for it in query_output_file_names
     for i, query in enumerate(tqdm(queries, desc="🔆5️⃣ Processing queries with CLIP embeddings 5️⃣🔆")):
+        result_string = ""
         print(f"5️⃣ Processing query {queries[i]} ({i+1}/{len(queries)}\n")
-        result_output_file = query_output_file_names[i]
+        query_output_file = query_output_file_names[i]
 
         if not flash_attn_available:
+            # if not using flash-attn, compute text embedding and similarities sequentially
             query_embedding = compute_clip_text_embedding.local(
                 clip_processor=clip_processor,
                 clip_model=clip_model,
@@ -1340,14 +1352,14 @@ def run_clip_queries(
                             for embedding in tqdm(image_embeddings, desc="🟨5️⃣ Calculating similarities naively 5️⃣🟨")]
 
         else:
-            # Process images in batches
+            # if using flash-attn: process images in batches
             similarities = []
 
             for batch_start in range(0, len(images), batch_size):
                 batch_end = min(batch_start + batch_size, len(images))
                 batch_images = images[batch_start:batch_end]
 
-                # Single forward pass for this batch
+                # perform single forward pass for this batch
                 with torch.no_grad():
                     # process the batch of images and the query, returning PyTorch tensors to
                     #   be used by CLIP
@@ -1380,9 +1392,11 @@ def run_clip_queries(
         top_indices = np.argsort(similarities)[::-1][:num_results].astype(int)
 
         result_string += (
-            f"📂 Results for:\n📂 Query: {queries[i]}\n"
+            f"🔮 Results for: \"{query}\"\n"
+            "📂 Embeddings source: CLIP embeddings\n"
+            f"🕰 Computed on: {get_formatted_datetime()} 🕰\n"
         )
-        result_string += RESULT_SEPARATOR_STRING
+        result_string += TITLE_SEPARATOR_STRING
 
         for j, idx in enumerate(top_indices):
             # idx is index of the path in frame_paths
@@ -1413,11 +1427,8 @@ def run_clip_queries(
             f"to {max(similarities):.3f}\n")
         result_string += RESULT_SEPARATOR_STRING
 
-        with open(result_output_file, "w") as f:
-            f.write(f"🔍🔍 Query: {query}\n🔍🔍 Results from searching through source: {embeddings_source}\n")
-            f.write(RESULT_SEPARATOR_STRING)
+        with open(query_output_file, "w") as f:
             f.write(result_string)
-            f.write(RESULT_SEPARATOR_STRING)
 
     commit_to_vol_with_exp_backoff()
 
@@ -1499,8 +1510,11 @@ def run_queries_with_embedding_set(
 
         result_string = ""
         result_string += (
-            f"📂 Results for:\n📂 Query: {query}\n📂 Embeddings source: {embeddings_source}\n"
+            f"🔮 Results for: \"{query}\"\n"
+            f"📂 Embeddings source: {embeddings_source}\n"
+            f"🕰 Computed on: {get_formatted_datetime()} 🕰\n"
         )
+        result_string += TITLE_SEPARATOR_STRING
         for i, idx in enumerate(top_indices):
             path, _ = embeddings_vector[idx]
             # Extract timestamp from path
@@ -1525,12 +1539,10 @@ def run_queries_with_embedding_set(
             f"🎭 Similarity scores ranged from {min(similarity_scores):.3f} "
             f"to {max(similarity_scores):.3f}\n"
         )
+        result_string += RESULT_SEPARATOR_STRING
 
         with open(query_output_file, "w") as f:
-            f.write(f"🔍🔍 Query: {query}\n🔍🔍 Results from searching through source: {embeddings_source}\n")
-            f.write(RESULT_SEPARATOR_STRING)
             f.write(result_string)
-            f.write(RESULT_SEPARATOR_STRING)
 
     commit_to_vol_with_exp_backoff()
 
@@ -1606,7 +1618,7 @@ def main(
         all_query_output_files.extend(query_output_files)
 
     # run custom-written function for computing and then searching through CLIP embeddings
-    query_output_files = run_clip_queries.remote(
+    query_output_files = run_queries_with_clip.remote(
         queries=queries,
         frame_paths=frame_paths,
         frame_interval=frame_interval,
