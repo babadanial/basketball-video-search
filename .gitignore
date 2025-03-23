@@ -3,4 +3,4 @@
 tmp_frames/
 *.pyc
 .DS_Store
-*/results
+results/
