@@ -1765,9 +1765,10 @@ def entrypoint_from_cli(
     # shorten URL if possible
     url = shorten_yt_link(url)
 
-    # process query string into array if provided;
+    # process query string into array if provided, by splitting on ";" and removing
+    #  surrounding whitespace from each individual query;
     #  otherwise use default query set
-    queries = q.split(";") if q else DEFAULT_QUERIES
+    queries = list(map(str.strip, q.split(";"))) if q else DEFAULT_QUERIES
 
     if o:
         print("🌟 Using optimized GPU image with flash-attn for CLIP model 🌟")
