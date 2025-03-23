@@ -1030,14 +1030,14 @@ def video_to_text_embeddings(
         OPENAI_VISION_MODEL,
         frame_to_gpt_description))
 
-    cohere_aya_embeddings_filepath = (
-        f"{VOLUME_EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}"
-        "-cohere-text-embeddings.txt"
-    )
-    descriptions_to_compute.append((
-        cohere_aya_embeddings_filepath,
-        "cohere-aya-embeddings",
-        frame_to_cohere_aya_description))
+    # cohere_aya_embeddings_filepath = (
+    #     f"{VOLUME_EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}"
+    #     "-cohere-text-embeddings.txt"
+    # )
+    # descriptions_to_compute.append((
+    #     cohere_aya_embeddings_filepath,
+    #     "cohere-aya-embeddings",
+    #     frame_to_cohere_aya_description))
 
     # llama_embeddings_filepath = (
     #     f"{VOLUME_EMBEDDINGS_DIR}/{video_id}-interval={frame_interval}"
