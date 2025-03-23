@@ -23,8 +23,8 @@ find moments that most closely match any desired text search keyword(s).\
 - A Modal account, with a token on your local devices using `modal setup`
   - An account be [created here]
   - *New users receive $30 in credits, enough to run the pipeline many, many times*
-- OpenAI, ~~Cohere and Groq~~ API keys placed in environment variables named `OPENAI_API_KEY`, ~~`COHERE_API_KEY`
-  and `GROQ_API_KEY` respectively~~
+- OpenAI, Cohere ~~and Groq~~ API keys placed in environment variables named `OPENAI_API_KEY`, `COHERE_API_KEY`
+  ~~and `GROQ_API_KEY`~~ respectively
 
 ## Running the pipeline
 
