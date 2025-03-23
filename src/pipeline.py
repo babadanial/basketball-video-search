@@ -29,6 +29,12 @@ import cv2
 import os
 import re
 
+"""
+TODO: https://github.com/QwenLM/Qwen2.5-VL
+TODO: in functions where GPU processes batches of images (only run_queries_with_clip at the moment),
+      implement multi-query processing when batch_size > len(images)
+"""
+
 # =================================================================================================
 # ⬇️ Constants & image selection
 # =================================================================================================
@@ -1089,7 +1095,6 @@ def video_to_text_embeddings(
                                for i in range(0, len(description_list), batch_size)]
         num_batches = len(description_batches)
 
-        # process the description batches into batches of embeddings and vstack them into a single array
         description_batches = [(batch, i, num_batches)
                                for i, batch in enumerate(description_batches)]
         embedding_set = []
@@ -1217,7 +1222,6 @@ def frame_to_clip_image_embeddings(clip_processor, clip_model, images, device, f
     timeout=10000)
 # used to compute text embedding (e.g. of a query) when flash-attn is not being used
 def compute_clip_text_embedding(clip_processor, clip_model, query, flash_attn_available, device):
-    print(f"5️⃣ Computing CLIP embedding for query \"{query}\"\n")
     # convert query into a PyTorch tensor
     query_inputs = clip_processor(text=query, return_tensors="pt", padding=True).to('cuda')
 
@@ -1233,7 +1237,6 @@ def compute_clip_text_embedding(clip_processor, clip_model, query, flash_attn_av
     # then move the tensor back to the CPU and convert it to a numpy array
     # and remove the first dimension (batch dimension) if it has size 1
     text_embedding = F.normalize(text_embedding, p=2, dim=-1).cpu().numpy().squeeze(0)
-    print(f"5️⃣ CLIP embedding for query {query} computed! 🪩🎊🪩\n")
     return text_embedding
 
 
