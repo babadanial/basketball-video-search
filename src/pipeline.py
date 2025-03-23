@@ -584,7 +584,11 @@ def extract_frames(video_path: str, video_metadata: dict, frame_interval: float 
     inputs = [(video_path, frames_dir, timestamp, width, height, index, num_frames_to_extract)
               for index, timestamp in enumerate(timestamps)]
 
-    frame_paths = list(extract_single_frame.map(inputs))
+    frame_paths = []
+    with tqdm(total=len(inputs), desc="Extracting frames") as pbar:
+        for result in extract_single_frame.map(inputs):
+            frame_paths.append(result)
+            pbar.update(1)
 
     print(f"✅✅✅ Extracted {len(frame_paths)} frames from {video_path} to {frames_dir} ✅✅✅\n")
 
@@ -628,12 +632,11 @@ def frame_to_cohere_aya_description(
         # Note: should not usually reach this code, since if cached descriptions exist,
         #   cached embeddings of these descriptions should also exist
         print(
-            f"⚡️*️⃣🍎 Cached Cohere Aya description found for {frame_name} at {description_file}"
+            f"⚡️*️⃣🍎 Cached Cohere Aya description found at {description_file}"
             f" - ({frame_index}/{num_frames}) ⚡️*️⃣\n")
         with open(description_file, "r") as f:
             return f.read()
-    else:
-        print(f"🍎 Getting Cohere Aya description of {frame_name}\n")
+    # else: print(f"🍎 Getting Cohere Aya description of {frame_name}\n")
 
     # Create client for just this frame (more efficient than sharing)
     client = cohere.ClientV2(os.environ["COHERE_API_KEY"])
@@ -673,7 +676,7 @@ def frame_to_cohere_aya_description(
                 f.write(description)
 
             commit_to_vol_with_exp_backoff()
-            print(f"✅🍎 Saved Cohere Aya description to {description_file}\n")
+            # print(f"✅🍎 Saved Cohere Aya description to {description_file}\n")
             return description
 
         except TooManyRequestsError:
@@ -710,12 +713,11 @@ def frame_to_llama_description(
     # Check if description already exists
     VOL.reload()
     if os.path.exists(description_file):
-        print(f"⚡️*️⃣🍊 Cached Llama description found for {frame_name} at {description_file}"
+        print(f"⚡️*️⃣🍊 Cached Llama description found at {description_file}"
               f" - ({frame_index}/{num_frames}) ⚡️*️⃣\n")
         with open(description_file, "r") as f:
             return f.read()
-    else:
-        print(f"🍊 Getting Llama description of {frame_name} - ({frame_index}/{num_frames}) 🍊\n")
+    # else: print(f"🍊 Getting Llama description of {frame_name} - ({frame_index}/{num_frames}) 🍊\n")
 
     client = OpenAI(
         base_url="https://api.groq.com/openai/v1",
@@ -756,7 +758,7 @@ def frame_to_llama_description(
                 f.write(description)
 
             commit_to_vol_with_exp_backoff()
-            print(f"✅🍊 Saved Llama description to {description_file}\n")
+            # print(f"✅🍊 Saved Llama description to {description_file}\n")
             return description
 
         except (InternalServerError, APIConnectionError) as e:
@@ -802,14 +804,11 @@ def frame_to_gpt_description(
     VOL.reload()
     if os.path.exists(description_file):
         print(
-            f"⚡️*️⃣🍋 Cached {OPENAI_VISION_MODEL} description found for {frame_name} at {description_file} "
+            f"⚡️*️⃣🍋 Cached {OPENAI_VISION_MODEL} description found at {description_file} "
             f"- ({frame_index}/{num_frames}) ⚡️*️⃣\n")
         with open(description_file, "r") as f:
             return f.read()
-    else:
-        print(
-            f"🍋 Getting {OPENAI_VISION_MODEL} description of {frame_name} "
-            f"- ({frame_index}/{num_frames}) 🍋\n")
+    # else: print(f"🍋 Getting {OPENAI_VISION_MODEL} description of {frame_name} - ({frame_index}/{num_frames}) 🍋\n")
 
     client = OpenAI()
 
@@ -847,7 +846,7 @@ def frame_to_gpt_description(
                 f.write(description)
 
             commit_to_vol_with_exp_backoff()
-            print(f"✅🍋 Saved GPT description to {description_file}\n")
+            # print(f"✅🍋 Saved GPT description to {description_file}\n")
             return description
         except (APIConnectionError, InternalServerError) as e:
             if isinstance(e, APIConnectionError):
@@ -891,16 +890,13 @@ def generate_cohere_embeddings_with_exp_backoff(params):
         log_val = description_batch[0][:60]
         args = {"texts": description_batch, }
         input_type = "search_document"
-        print(
-            "🔵🔵 Generating Cohere embeddings for text descriptions batch "
-            f"starting with {log_val} - {log_index}\n"
-        )
+        # print(f"🔵🔵 Generating Cohere embeddings for text descriptions batch starting with {log_val} - {log_index}\n")
     elif type(candidate) is str:
         image_str = candidate
         log_val = image_str[:50]
         args = {"images": [image_str], }
         input_type = "image"
-        print(f"🟤🟤 Generating Cohere embedding for image {log_val} - {log_index}\n")
+        # print(f"🟤🟤 Generating Cohere embedding for image {log_val} - {log_index}\n")
     else:
         raise ValueError(
             "Error in generate_cohere_embeddings: must provide either a list of strings "
@@ -1065,11 +1061,16 @@ def video_to_text_embeddings(
             result_file_and_source_tuples.append((embeddings_filepath, source_name))
         else:
             # map frame paths to descriptions using the Modal function provided
-            description_list = list(frame_to_description_modal_func.map(
-                frame_paths,
-                count(1, 1),
-                repeat(num_frames),
-                return_exceptions=True))
+            description_list = []
+            with tqdm(total=num_frames, desc=f"Generating {source_name} descriptions") as pbar:
+                for result in frame_to_description_modal_func.map(
+                    frame_paths,
+                    count(1, 1),
+                    repeat(num_frames),
+                    return_exceptions=True
+                ):
+                    description_list.append(result)
+                    pbar.update(1)
 
             print(f"🟢🟢🟢 {source_name} - successfully computed all descriptions from frames 🟢🟢🟢")
             embeddings_to_compute.append((
@@ -1097,8 +1098,13 @@ def video_to_text_embeddings(
         # process the description batches into batches of embeddings and vstack them into a single array
         description_batches = [(batch, i, num_batches)
                                for i, batch in enumerate(description_batches)]
-        embedding_set = list(
-            generate_cohere_embeddings_with_exp_backoff.map(description_batches))
+        embedding_set = []
+        # process the description batches into batches of embeddings and vstack them into a single array
+        with tqdm(total=num_batches, desc=f"Generating embeddings using Cohere Embed from descriptions generated by {source_name}") as pbar:
+            for result in generate_cohere_embeddings_with_exp_backoff.map(description_batches):
+                embedding_set.append(result)
+                pbar.update(1)
+
         if not embedding_set:
             raise ValueError("ERROR: No embeddings generated for video text descriptions\n")
         embedding_set = np.vstack(embedding_set)
@@ -1147,11 +1153,20 @@ def video_to_cohere_image_embeddings(
         return [(cohere_image_embeddings_filepath, "cohere-image-embeddings")]
 
     print(f"🔺🔺 Generating Cohere-compatible image strings for video {video_id} 🔺🔺\n")
-    encoded_images = list(encode_image_to_string.map(frame_paths))
+    encoded_images = []
+    with tqdm(total=len(frame_paths), desc="Encoding images into strings") as pbar:
+        for result in encode_image_to_string_with_cache.map(frame_paths):
+            encoded_images.append(result)
+            pbar.update(1)
+
     print(f"🟥🟥 Generating Cohere image embeddings for video {video_id} 🟥🟥\n")
     num_frames = len(encoded_images)
     frame_strings = [(encoded_image, i, num_frames) for i, encoded_image in enumerate(encoded_images)]
-    embedding_set = list(generate_cohere_embeddings_with_exp_backoff.map(frame_strings))
+    embedding_set = []
+    with tqdm(total=num_frames, desc="Generating Cohere image embeddings") as pbar:
+        for result in generate_cohere_embeddings_with_exp_backoff.map(frame_strings):
+            embedding_set.append(result)
+            pbar.update(1)
 
     if not embedding_set:
         raise ValueError("ERROR: No image embeddings generated for video frames\n")
