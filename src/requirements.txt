@@ -18,3 +18,4 @@ wheel
 httpx
 openai
 pillow
+pytz
