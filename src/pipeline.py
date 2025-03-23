@@ -334,13 +334,32 @@ def commit_to_vol_with_exp_backoff():
 
 
 @app.function(image=CPU_IMAGE, volumes={MODAL_VOLUME_PATH: VOL})
-def encode_image_to_string(image_path: str) -> str:
+def encode_image_to_string_with_cache(image_path: str) -> str:
     """
     Convert an image to a base64-encoded string for use with Cohere.
+    Caches encodings in Modal volume.
     """
+    VOL.reload()
+    cache_dir = f"{VOLUME_DOWNLOAD_DIR}/image_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = f"{cache_dir}/{Path(image_path).stem}.txt"
+
+    # return encoding if it already exists
+    if os.path.exists(cache_file):
+        with open(cache_file, "r") as f:
+            return f.read()
+
+    # compute the encoding ...
     with open(image_path, "rb") as img_file:
         utf8_encoding = base64.b64encode(img_file.read()).decode('utf-8')
-    return f"data:image/jpeg;base64,{utf8_encoding}"
+    encoding = f"data:image/jpeg;base64,{utf8_encoding}"
+
+    # ... and cache it
+    with open(cache_file, "w") as f:
+        f.write(encoding)
+    commit_to_vol_with_exp_backoff()
+
+    return encoding
 
 
 # =================================================================================================
@@ -631,7 +650,7 @@ def frame_to_cohere_aya_description(
     ]
     messages[0]["content"].append({
         "type": "image_url",
-        "image_url": {"url": encode_image_to_string.local(frame_path_str)}
+        "image_url": {"url": encode_image_to_string_with_cache.local(frame_path_str)}
     })
 
     # Implement exponential backoff
@@ -711,7 +730,7 @@ def frame_to_llama_description(
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": encode_image_to_string.local(frame_path_str),
+                        "url": encode_image_to_string_with_cache.local(frame_path_str),
                         "detail": "high",
                     }
                 }
@@ -802,7 +821,7 @@ def frame_to_gpt_description(
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": encode_image_to_string.local(frame_path_str),
+                        "url": encode_image_to_string_with_cache.local(frame_path_str),
                         "detail": "high",
                     }
                 }
