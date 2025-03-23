@@ -1,5 +1,5 @@
-#!/opt/homebrew/bin/python3
-import os
+#! python3
+# Note this script **must** be run in the project root directory
 import subprocess
 import argparse
 
@@ -38,7 +38,6 @@ def main():
     print(f"Arguments being passed to the pipeline: {pipeline_args_str}")
 
     # Get path to env setup script
-    current_dir = os.getcwd()
     setup_script_path = "utils/setup.sh"
 
     # Setup environment and run modal in the same shell process
