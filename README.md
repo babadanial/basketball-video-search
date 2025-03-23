@@ -1,7 +1,7 @@
 ## Description
 
 This pipeline (implemented as a [Modal] app) allows searching through a YouTube video of basketball gameplay footage to
-find moments that most closely match any desired text search keyword(s).\
+find moments that most closely match any desired text search keyword(s).
 
 ### Methodology
 
