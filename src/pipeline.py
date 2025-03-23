@@ -491,34 +491,29 @@ def extract_single_frame(params):
         frame_path,
     ]
 
+    retry_count = 1
+    max_retries = 5
     # Run extraction command and commit it to the volume
-    result = subprocess.run(extract_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    commit_to_vol_with_exp_backoff()
-
-    print(
-        f"🟡 Extracting frame at {minutes:02d}:{seconds:02d}.{milliseconds:03d} "
-        f"| ({i+1}/{num_frames}) 🟡\n"
-    )
-
-    if os.path.exists(frame_path):
-        # Verify dimensions of extracted frame
-        img = cv2.imread(frame_path)
-        if img is not None:
-            actual_height, actual_width = img.shape[:2]
-            print(
-                f"✅ Frame of size [{actual_width}x{actual_height}] "
-                f"saved at {frame_path} - ({i+1}/{num_frames})\n"
-            )
+    while (retry_count < max_retries):
+        # print(
+        #     f"🟡 Extracting frame at {minutes:02d}:{seconds:02d}.{milliseconds:03d} "
+        #     f"| ({i+1}/{num_frames}) 🟡\n"
+        # )
+        result = subprocess.run(extract_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        commit_to_vol_with_exp_backoff()
+        if os.path.exists(frame_path) and cv2.imread(frame_path) is not None:
             return frame_path
+        elif retry_count < max_retries:
+            sleep_time = 0.25
+            print(
+                f"🟠 Failed to extract frame at {timestamp}s after attempt ({retry_count}/{max_retries}) "
+                f"- retrying in {sleep_time} seconds 🟠")
+            retry_count += 1
+            time.sleep(1)
         else:
-            print(f"🔴 Failed to extract frame at {timestamp}s\n")
-    else:
-        print(f"🔴‼️ Frame was never extracted - {frame_path} did not exist! \n")
-        print(f"⚠️ ffmpeg stderr: {result.stderr}")
-        print(f"⚠️ ffmpeg stdout: {result.stdout}")
-
-    raise RuntimeError(f"Error extracting frame at {timestamp}s")
+            print(f"🔴 Frame was never extracted - {frame_path} did not exist! 🔴\n")
+            print(f"⚠️ ffmpeg stderr: {result.stderr}")
+            print(f"⚠️ ffmpeg stdout: {result.stdout}")
 
 
 @app.function(image=CPU_IMAGE, volumes={MODAL_VOLUME_PATH: VOL}, timeout=10000)
@@ -583,7 +578,6 @@ def extract_frames(video_path: str, video_metadata: dict, frame_interval: float 
     # Extract frames
     inputs = [(video_path, frames_dir, timestamp, width, height, index, num_frames_to_extract)
               for index, timestamp in enumerate(timestamps)]
-
     frame_paths = []
     with tqdm(total=len(inputs), desc="Extracting frames") as pbar:
         for result in extract_single_frame.map(inputs):
