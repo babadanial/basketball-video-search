@@ -1,4 +1,4 @@
-*venv
+*venv*
 .vscode
 tmp_frames/
 *.pyc
