@@ -15,7 +15,7 @@ find moments that most closely match any desired text search keyword(s).
   - direct image embeddings using each of
     - Cohere Embed
     - CLIP
-- Embeddings of query text are computed and exhaustive search against the embedding spaces is run
+- Embeddings of query text are computed, and exhaustive search against the embedding spaces above is run
 
 ## Requirements
   
@@ -30,33 +30,33 @@ find moments that most closely match any desired text search keyword(s).
 
 ### `./run_pipeline.py [options]`
 
-`run_pipeline.py` is a convenience script allowing users to run the pipeline without writing `modal run ...`;
-the pipeline source code can be found in `src/pipeline.py`.
+`run_pipeline.py` is a convenience script allowing users to run the pipeline without writing `modal run ...`; it 
+**must be run from the project root directory**. The pipeline source code can be found in `src/pipeline.py`.
 
 ### Command line options
 
 All of the following are optional; defaults are specified.
 
 - There are 2 ways to specify a video to be used for the search:
-  - `--u <url>` with any YouTube URL
+  - **`--u <url>`** with any YouTube URL
   - the file `utils/test_videos.csv` contains pre-chosen videos of varying lengths that are ideal for testing:
-    - `--v <k>` allows specifying the video at row `k` of the CSV file to be used for the search
+    - **`--v <k>`** allows specifying the video at row `k` of the CSV file to be used for the search
     - note that if this option overrides any selection made with `--u`
   - the default video used is [The Top 10 NBA Plays Of All Time] if neither `--u` nor `--v` are specified
-- `--q <query_string>` contains 1 or more queries (separated by `;`)
+- **`--q <query_string>`** contains 1 or more queries (separated by `;`)
   - e.g. `--q dunk`, `--q "slam dunk"`,  `--q "slam dunk; three pointer"`
   - If this option is not set, the video is searched for the following default list of queries:
-- `--n <number of results>` - the number of results to return for the query from *each* embedding set
+- **`--n <number of results>`** - the number of results to return for the query from *each* embedding set
   - Set to 10 by default
-- `--i <interval>` - the amount of time (in seconds) to wait in between sampling frames from the video to be embedded
+- **`--i <interval>`** - the amount of time (in seconds) to wait in between sampling frames from the video to be embedded
   - Set to 0.5 by default
-- `--c` - if specified, will copy results from Modal volume to the local directory `results/<video title>`
+- **`--c`** - if specified, will copy results from Modal volume to the local directory `<project root>/results/<video title>` (details below)
 
 ### Viewing results
 
 - The pipeline will create a Modal volume associated with your account called *basketball-video-search*
   - Result files can be found in the `results/<video_title>` directory in this Modal volume.
-  - Each query has its own result file; this one file will contain the results of searching against *each* embedding set for easy comparison between models.
+  - Each query has its own result file; this one file will contain the results of searching against *each* embedding set, allowing easy comparison between the various models' results for any given query.
 - They can be downloaded to your device by using the [`modal volume get...` command], or by setting the `--c` argument when running the pipeline.
 
 [Modal]: https://modal.com/
