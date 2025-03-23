@@ -4,6 +4,7 @@ This pipeline (implemented as a [Modal] app) allows searching through a YouTube 
 find moments that most closely match any desired text search keyword(s).\
 
 ### Methodology
+
 - Frames are sampled at configurable intervals
 - Embeddings of frame contents are computed using *each* of the following methods to enable comparison between 
   them when examining results:
@@ -49,12 +50,13 @@ All of the following are optional; defaults are specified.
   - Set to 10 by default
 - `--i <interval>` - the amount of time (in seconds) to wait in between sampling frames from the video to be embedded
   - Set to 0.5 by default
-- `--c` - if specified, will copy results from Modal volume to local directory
+- `--c` - if specified, will copy results from Modal volume to the local directory `results/<video title>`
 
 ### Viewing results
 
-- By default, results will be saved in a Modal volume associated with your account called *basketball-video-search*
-- Result files can be found in the `results/<video_title>` directory in the Modal volume.
+- The pipeline will create a Modal volume associated with your account called *basketball-video-search*
+  - Result files can be found in the `results/<video_title>` directory in this Modal volume.
+  - Each query has its own result file; this one file will contain the results of searching against *each* embedding set for easy comparison between models.
 - They can be downloaded to your device by using the [`modal volume get...` command], or by setting the `--c` argument when running the pipeline.
 
 [Modal]: https://modal.com/
