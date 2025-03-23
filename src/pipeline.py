@@ -1354,14 +1354,12 @@ def run_queries_with_clip(
 
         else:
             print(f"5️⃣ Computing frame embeddings using CLIP model for {video_id} 5️⃣\n")
-            frame_to_clip_image_embeddings.local(
+            image_embeddings = frame_to_clip_image_embeddings.local(
                 clip_processor,
                 clip_model,
                 images,
                 'cuda',
                 flash_attn_available)
-
-            image_embeddings = np.vstack(image_embeddings)
             np.save(clip_image_embeddings_filepath, image_embeddings)
     else:
         # --- TODO: implement multi-query processing when batch_size > len(images) ---
